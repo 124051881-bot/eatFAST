@@ -25,11 +25,11 @@ app.use(express.json());
 process.on('uncaughtException', (err) => console.error('💥 [UNCAUGHT EXCEPTION]:', err));
 process.on('unhandledRejection', (reason) => console.error('💥 [UNHANDLED REJECTION]:', reason));
 
-// Configuración por defecto de la base de datos
+// Credenciales directas de tu base de datos en Railway
 const defaultDbConfig = {
-    host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'localhost',
+    host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || process.env.DB_NORTE_USER || 'root',
-    password: process.env.MYSQLPASSWORD || process.env.DB_NORTE_PASSWORD || '',
+    password: process.env.MYSQLPASSWORD || process.env.DB_NORTE_PASSWORD || 'nmODXbLsvPeieKDUichwihnDvmqChoGI',
     database: process.env.MYSQLDATABASE || process.env.DB_NORTE_NAME || 'railway',
     port: parseInt(process.env.MYSQLPORT || process.env.DB_NORTE_PORT || '3306', 10)
 };
@@ -58,7 +58,7 @@ const dbConfigs = {
     }
 };
 
-// Helper para generador de conexiones a MySQL
+// Generador de conexiones a MySQL con log detallado
 async function getNodoConnection(id_region) {
     try {
         const regionValida = (!id_region || id_region === 0 || !dbConfigs[id_region]) ? 1 : id_region;
@@ -73,8 +73,9 @@ async function getNodoConnection(id_region) {
             connectTimeout: 10000
         });
     } catch (error) {
-        console.error(`❌ [ERROR DB REGION ${id_region}]: ${error.message}`);
-        throw new Error(`No se pudo conectar a la base de datos de la región ${id_region}: ${error.message}`);
+        const detalleError = error.code || error.message || JSON.stringify(error);
+        console.error(`❌ [ERROR DB REGION ${id_region}]:`, error);
+        throw new Error(`No se pudo conectar a la base de datos de la región ${id_region}: ${detalleError}`);
     }
 }
 
@@ -123,7 +124,7 @@ app.post('/api/auth/register', async (req, res) => {
 
         connection = await getNodoConnection(targetRegion);
         
-        // Genera id numérico único basado en epoch para compatibilidad INT de MySQL
+        // ID numérico entero para la columna INT de MySQL
         const id_usuario = Math.floor(Date.now() / 1000); 
 
         const query = `
@@ -260,7 +261,7 @@ app.post('/api/pedidos/crear', async (req, res) => {
     }
 });
 
-// GESTIÓN DE PEDIDOS: OBTENER ACTIVOS (ROBUSTO CONTRA ERRORES 500)
+// GESTIÓN DE PEDIDOS: OBTENER ACTIVOS
 app.get('/api/pedidos/activos/:id_region', async (req, res) => {
     const { id_region } = req.params;
     let connection;
@@ -276,7 +277,6 @@ app.get('/api/pedidos/activos/:id_region', async (req, res) => {
         return res.status(200).json({ success: true, pedidos: rows });
     } catch (error) {
         console.error(`❌ [ERROR PEDIDOS ACTIVOS]: ${error.message}`);
-        // Retorna array vacío evitando romper la UI en Flutter con error 500
         return res.status(200).json({ success: true, pedidos: [], warning: error.message });
     } finally {
         if (connection) await connection.end();
@@ -329,7 +329,7 @@ app.get('/api/productos/:id_region', async (req, res) => {
     }
 });
 
-// Arrancar servidor Express + HTTP + WebSockets
+// Arrancar servidor Express
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 EatFast Engine corriendo correctamente en el puerto: ${PORT}`);
