@@ -26,7 +26,7 @@ app.use(express.json());
 process.on('uncaughtException', (err) => console.error('💥 [UNCAUGHT EXCEPTION]:', err));
 process.on('unhandledRejection', (reason) => console.error('💥 [UNHANDLED REJECTION]:', reason));
 
-// Configuración predeterminada de MySQL usando las variables de red interna de Railway
+// Configuración predeterminada de MySQL por campos individuales
 const defaultDbConfig = {
     host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || process.env.DB_NORTE_USER || 'root',
@@ -60,12 +60,20 @@ const dbConfigs = {
     }
 };
 
-// Generador de conexión a la base de datos por región
+// Generador de conexión a la base de datos (Soporta MYSQL_URL o fallback individual)
 async function getNodoConnection(id_region) {
     try {
         const regionValida = (!id_region || id_region === 0 || !dbConfigs[id_region]) ? 1 : id_region;
         const config = dbConfigs[regionValida];
 
+        // Prioridad 1: Usar la URL completa provista por Railway (MYSQL_URL o MYSQL_PUBLIC_URL)
+        const connectionString = process.env.MYSQL_URL || process.env.MYSQL_PUBLIC_URL;
+
+        if (connectionString && (regionValida === 1 || !process.env.DB_SUR_HOST)) {
+            return await mysql.createConnection(connectionString);
+        }
+
+        // Prioridad 2: Conexión usando parámetros desglosados
         return await mysql.createConnection({
             host: config.host,
             user: config.user,
