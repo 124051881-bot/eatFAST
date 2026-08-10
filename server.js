@@ -5,13 +5,13 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const path = require('path');
 
-// Cargar variables de entorno
+// Cargar variables de entorno si existe archivo .env local
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 const server = http.createServer(app);
 
-// Configuración de WebSockets
+// Configuración de WebSockets con CORS abierto para Flutter / Web
 const io = new Server(server, {
     cors: {
         origin: '*',
@@ -22,18 +22,20 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
+// Manejo global de excepciones no capturadas para evitar que el servidor caiga de golpe
 process.on('uncaughtException', (err) => console.error('💥 [UNCAUGHT EXCEPTION]:', err));
 process.on('unhandledRejection', (reason) => console.error('💥 [UNHANDLED REJECTION]:', reason));
 
-// Credenciales directas de tu base de datos en Railway
+// Configuración predeterminada de MySQL con fallback a TCP Proxy de Railway
 const defaultDbConfig = {
-    host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'mysql.railway.internal',
+    host: process.env.RAILWAY_TCP_PROXY_DOMAIN || process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || process.env.DB_NORTE_USER || 'root',
     password: process.env.MYSQLPASSWORD || process.env.DB_NORTE_PASSWORD || 'nmODXbLsvPeieKDUichwihnDvmqChoGI',
     database: process.env.MYSQLDATABASE || process.env.DB_NORTE_NAME || 'railway',
-    port: parseInt(process.env.MYSQLPORT || process.env.DB_NORTE_PORT || '3306', 10)
+    port: parseInt(process.env.RAILWAY_TCP_PROXY_PORT || process.env.MYSQLPORT || process.env.DB_NORTE_PORT || '3306', 10)
 };
 
+// Configuración multirregión (Norte, Sur, Centro)
 const dbConfigs = {
     1: { 
         host: process.env.DB_NORTE_HOST || defaultDbConfig.host, 
@@ -58,7 +60,7 @@ const dbConfigs = {
     }
 };
 
-// Generador de conexiones a MySQL con log detallado
+// Generador de conexión a la base de datos por región
 async function getNodoConnection(id_region) {
     try {
         const regionValida = (!id_region || id_region === 0 || !dbConfigs[id_region]) ? 1 : id_region;
@@ -79,7 +81,7 @@ async function getNodoConnection(id_region) {
     }
 }
 
-// Configuración de eventos WebSockets
+// Configuración y eventos de Socket.IO
 io.on('connection', (socket) => {
     console.log(`⚡ [SOCKET CONECTADO]: ${socket.id}`);
 
@@ -106,7 +108,7 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => console.log(`❌ [SOCKET DESCONECTADO]: ${socket.id}`));
 });
 
-// Rutas base y healthcheck
+// Rutas base
 app.get('/', (req, res) => res.send("EatFast Backend Server is Running!"));
 app.get('/api/health', (req, res) => res.json({ status: "online", system: "EatFast Engine v3.0" }));
 
@@ -124,7 +126,6 @@ app.post('/api/auth/register', async (req, res) => {
 
         connection = await getNodoConnection(targetRegion);
         
-        // ID numérico entero para la columna INT de MySQL
         const id_usuario = Math.floor(Date.now() / 1000); 
 
         const query = `
