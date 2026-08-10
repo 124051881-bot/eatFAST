@@ -5,7 +5,7 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const path = require('path');
 
-// Cargar variables de entorno si existe archivo .env local
+// Cargar variables de entorno locales si existen
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
@@ -22,17 +22,17 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// Manejo global de excepciones no capturadas para evitar que el servidor caiga de golpe
+// Manejo global de excepciones para evitar caídas del servidor
 process.on('uncaughtException', (err) => console.error('💥 [UNCAUGHT EXCEPTION]:', err));
 process.on('unhandledRejection', (reason) => console.error('💥 [UNHANDLED REJECTION]:', reason));
 
-// Configuración predeterminada de MySQL con fallback a TCP Proxy de Railway
+// Configuración predeterminada de MySQL usando las variables de red interna de Railway
 const defaultDbConfig = {
-    host: process.env.RAILWAY_TCP_PROXY_DOMAIN || process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'mysql.railway.internal',
+    host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || process.env.DB_NORTE_USER || 'root',
     password: process.env.MYSQLPASSWORD || process.env.DB_NORTE_PASSWORD || 'nmODXbLsvPeieKDUichwihnDvmqChoGI',
     database: process.env.MYSQLDATABASE || process.env.DB_NORTE_NAME || 'railway',
-    port: parseInt(process.env.RAILWAY_TCP_PROXY_PORT || process.env.MYSQLPORT || process.env.DB_NORTE_PORT || '3306', 10)
+    port: parseInt(process.env.MYSQLPORT || process.env.DB_NORTE_PORT || '3306', 10)
 };
 
 // Configuración multirregión (Norte, Sur, Centro)
@@ -72,7 +72,9 @@ async function getNodoConnection(id_region) {
             password: config.password,
             database: config.database,
             port: config.port,
-            connectTimeout: 10000
+            connectTimeout: 10000,
+            enableKeepAlive: true,
+            keepAliveInitialDelay: 10000
         });
     } catch (error) {
         const detalleError = error.code || error.message || JSON.stringify(error);
