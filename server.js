@@ -4,16 +4,14 @@ const { Server } = require('socket.io');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
 const path = require('path');
-const os = require('os');
-const { v4: uuidv4 } = require('uuid');
 
-// Cargar variables de entorno desde el .env local
+// Cargar variables de entorno
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 const server = http.createServer(app);
 
-// Configuración de WebSockets con Socket.IO para tiempo real
+// Configuración de WebSockets
 const io = new Server(server, {
     cors: {
         origin: '*',
@@ -24,84 +22,94 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// Mapa de configuraciones regionales
+process.on('uncaughtException', (err) => console.error('💥 [UNCAUGHT EXCEPTION]:', err));
+process.on('unhandledRejection', (reason) => console.error('💥 [UNHANDLED REJECTION]:', reason));
+
+// Helper para obtener credenciales de Railway o entorno local
+const defaultDbConfig = {
+    host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'localhost',
+    user: process.env.MYSQLUSER || process.env.DB_NORTE_USER || 'root',
+    password: process.env.MYSQLPASSWORD || process.env.DB_NORTE_PASSWORD || '',
+    database: process.env.MYSQLDATABASE || process.env.DB_NORTE_NAME || 'railway',
+    port: parseInt(process.env.MYSQLPORT || process.env.DB_NORTE_PORT || '3306', 10)
+};
+
 const dbConfigs = {
     1: { 
-        host: process.env.DB_NORTE_HOST, 
-        user: process.env.DB_NORTE_USER, 
-        password: process.env.DB_NORTE_PASSWORD, 
-        database: process.env.DB_NORTE_NAME 
+        host: process.env.DB_NORTE_HOST || defaultDbConfig.host, 
+        user: process.env.DB_NORTE_USER || defaultDbConfig.user, 
+        password: process.env.DB_NORTE_PASSWORD || defaultDbConfig.password, 
+        database: process.env.DB_NORTE_NAME || defaultDbConfig.database,
+        port: parseInt(process.env.DB_NORTE_PORT || defaultDbConfig.port, 10)
     },
     2: { 
-        host: process.env.DB_SUR_HOST, 
-        user: process.env.DB_SUR_USER, 
-        password: process.env.DB_SUR_PASSWORD, 
-        database: process.env.DB_SUR_NAME 
+        host: process.env.DB_SUR_HOST || defaultDbConfig.host, 
+        user: process.env.DB_SUR_USER || defaultDbConfig.user, 
+        password: process.env.DB_SUR_PASSWORD || defaultDbConfig.password, 
+        database: process.env.DB_SUR_NAME || defaultDbConfig.database,
+        port: parseInt(process.env.DB_SUR_PORT || defaultDbConfig.port, 10)
     },
     3: { 
-        host: process.env.DB_CENTRO_HOST, 
-        user: process.env.DB_CENTRO_USER, 
-        password: process.env.DB_CENTRO_PASSWORD, 
-        database: process.env.DB_CENTRO_NAME 
+        host: process.env.DB_CENTRO_HOST || defaultDbConfig.host, 
+        user: process.env.DB_CENTRO_USER || defaultDbConfig.user, 
+        password: process.env.DB_CENTRO_PASSWORD || defaultDbConfig.password, 
+        database: process.env.DB_CENTRO_NAME || defaultDbConfig.database,
+        port: parseInt(process.env.DB_CENTRO_PORT || defaultDbConfig.port, 10)
     }
 };
 
-// Generador dinámico de conexiones a bases de datos distribuidas
+// Generador de conexiones
 async function getNodoConnection(id_region) {
-    const regionValida = id_region === 0 || !dbConfigs[id_region] ? 1 : id_region;
-    const config = dbConfigs[regionValida];
-    if (!config || !config.host) {
-        throw new Error(`Configuración de red no encontrada para el Nodo Región ${id_region}.`);
+    try {
+        const regionValida = (!id_region || id_region === 0 || !dbConfigs[id_region]) ? 1 : id_region;
+        const config = dbConfigs[regionValida];
+
+        return await mysql.createConnection({
+            host: config.host,
+            user: config.user,
+            password: config.password,
+            database: config.database,
+            port: config.port,
+            connectTimeout: 10000
+        });
+    } catch (error) {
+        console.error(`❌ [ERROR DB REGION ${id_region}]: ${error.message}`);
+        throw new Error(`No se pudo conectar a la base de datos de la región ${id_region}: ${error.message}`);
     }
-    return await mysql.createConnection(config);
 }
 
-// ====================================================================
-// 🔌 SALAS EN TIEMPO REAL (SOCKET.IO)
-// ====================================================================
+// WebSockets
 io.on('connection', (socket) => {
     console.log(`⚡ [SOCKET CONECTADO]: ${socket.id}`);
 
-    // Suscribir dispositivo a la sala de su región (ej. 'region_1')
-    socket.on('unirse_region', (data) => {
+    const unirseRegionHandler = (data) => {
         const id_region = typeof data === 'object' ? data.id_region : data;
         const roomName = `region_${id_region || 1}`;
         socket.join(roomName);
-        console.log(`👥 Socket ${socket.id} unido a la sala: ${roomName}`);
-    });
+    };
 
-    // Suscribir dispositivo al monitoreo de un pedido específico
+    socket.on('join_region', unirseRegionHandler);
+    socket.on('unirse_region', unirseRegionHandler);
+
     socket.on('escuchar_pedido', (id_pedido) => {
         socket.join(`pedido_${id_pedido}`);
-        console.log(`📦 Socket ${socket.id} escuchando cambios del Pedido #${id_pedido}`);
     });
 
-    // Transmisión GPS en tiempo real
     socket.on('actualizar_ubicacion_repartidor', (data) => {
         const { id_pedido, id_region, lat, lng } = data;
         io.to(`region_${id_region || 1}`).emit('ubicacion_repartidor_actualizada', {
-            id_pedido,
-            lat,
-            lng,
-            timestamp: new Date().toISOString()
+            id_pedido, lat, lng, timestamp: new Date().toISOString()
         });
     });
 
-    socket.on('disconnect', () => {
-        console.log(`❌ [SOCKET DESCONECTADO]: ${socket.id}`);
-    });
+    socket.on('disconnect', () => console.log(`❌ [SOCKET DESCONECTADO]: ${socket.id}`));
 });
 
-// ====================================================================
-// 💓 HEALTH CHECK
-// ====================================================================
-app.get('/api/health', (req, res) => {
-    res.json({ status: "online", system: "EatFast Distributed Core Engine v3.0" });
-});
+// Rutas base
+app.get('/', (req, res) => res.send("EatFast Backend Server is Running!"));
+app.get('/api/health', (req, res) => res.json({ status: "online", system: "EatFast Engine v3.0" }));
 
-// ====================================================================
-// 🏢 AUTENTICACIÓN (LOGIN & REGISTRO)
-// ====================================================================
+// Autenticación
 app.post('/api/auth/register', async (req, res) => {
     const { nombre, email, password, rol, id_region, idRegion } = req.body;
     const regionIdFinal = id_region !== undefined ? id_region : idRegion;
@@ -118,13 +126,10 @@ app.post('/api/auth/register', async (req, res) => {
         }
 
         const nodoConexion = targetRegion === 0 ? 1 : targetRegion;
-
-        if (!dbConfigs[nodoConexion]) {
-            return res.status(400).json({ success: false, message: "Región geográfica inválida." });
-        }
-
         connection = await getNodoConnection(nodoConexion);
-        const id_usuario = 'usr-' + uuidv4().substring(0, 8);
+
+        // Generar un id_usuario numérico único compatible con la columna INT de MySQL
+        const id_usuario = Math.floor(Date.now() / 1000); 
 
         const query = `
             INSERT INTO usuarios (id_usuario, id_region, nombre, email, password, rol) 
@@ -133,7 +138,7 @@ app.post('/api/auth/register', async (req, res) => {
         
         await connection.execute(query, [
             id_usuario, 
-            targetRegion, 
+            nodoConexion, 
             nombre, 
             email.trim(), 
             password, 
@@ -143,7 +148,7 @@ app.post('/api/auth/register', async (req, res) => {
         res.status(201).json({ 
             success: true, 
             message: "Registro exitoso.",
-            usuario: { id_usuario, id_region: targetRegion, nombre, email, rol }
+            usuario: { id_usuario, id_region: nodoConexion, nombre, email, rol: rol || 'cliente' }
         });
 
     } catch (error) {
@@ -161,11 +166,7 @@ app.post('/api/auth/login', async (req, res) => {
     let connection;
 
     try {
-        if (isNaN(id_region)) {
-            return res.status(400).json({ success: false, message: "ID de región inválido." });
-        }
-
-        const nodoAConectar = id_region === 0 ? 1 : id_region;
+        const nodoAConectar = isNaN(id_region) || id_region === 0 ? 1 : id_region;
         connection = await getNodoConnection(nodoAConectar);
         
         const [rows] = await connection.execute(
@@ -202,11 +203,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// ====================================================================
-// 🛒 PEDIDOS (CRUD COMPLETO)
-// ====================================================================
-
-// 🟢 ALTA: Crear Pedido + Emitir Socket.IO al Repartidor (CORREGIDO)
+// Pedidos
 app.post('/api/pedidos/crear', async (req, res) => {
     const { id_usuario, id_region, id_restaurante, total, productos } = req.body;
     let connection;
@@ -218,10 +215,7 @@ app.post('/api/pedidos/crear', async (req, res) => {
         const totalTarget = total !== undefined ? parseFloat(total) : 0.0;
 
         if (!usuarioTarget) {
-            return res.status(400).json({ 
-                success: false, 
-                message: "El campo 'id_usuario' es obligatorio y no puede ser undefined." 
-            });
+            return res.status(400).json({ success: false, message: "El campo 'id_usuario' es obligatorio." });
         }
 
         connection = await getNodoConnection(nodoTarget);
@@ -233,10 +227,7 @@ app.post('/api/pedidos/crear', async (req, res) => {
         `;
         
         const [resultPedido] = await connection.execute(queryPedido, [
-            usuarioTarget, 
-            nodoTarget, 
-            restauranteTarget, 
-            totalTarget
+            usuarioTarget, nodoTarget, restauranteTarget, totalTarget
         ]);
 
         const id_pedido = resultPedido.insertId;
@@ -248,10 +239,7 @@ app.post('/api/pedidos/crear', async (req, res) => {
             `;
             for (const prod of productos) {
                 await connection.execute(queryDetalle, [
-                    id_pedido, 
-                    prod.id_producto ?? null, 
-                    prod.cantidad ?? 1, 
-                    prod.precio_unitario ?? 0.0
+                    id_pedido, prod.id_producto ?? null, prod.cantidad ?? 1, prod.precio_unitario ?? 0.0
                 ]);
             }
         }
@@ -259,23 +247,13 @@ app.post('/api/pedidos/crear', async (req, res) => {
         await connection.commit();
 
         const nuevoPedido = {
-            id_pedido,
-            id_usuario: usuarioTarget,
-            id_region: nodoTarget,
-            id_restaurante: restauranteTarget,
-            total: totalTarget,
-            estado: 'pendiente'
+            id_pedido, id_usuario: usuarioTarget, id_region: nodoTarget,
+            id_restaurante: restauranteTarget, total: totalTarget, estado: 'pendiente'
         };
 
-        // ⚡ Notificar ALTA EN TIEMPO REAL a la sala de repartidores
         io.to(`region_${nodoTarget}`).emit('nuevo_pedido', nuevoPedido);
 
-        res.status(201).json({ 
-            success: true, 
-            message: "Pedido registrado y enviado.",
-            id_pedido,
-            estado: 'pendiente'
-        });
+        res.status(201).json({ success: true, message: "Pedido registrado exitosamente.", id_pedido, estado: 'pendiente' });
 
     } catch (error) {
         if (connection) await connection.rollback();
@@ -286,7 +264,6 @@ app.post('/api/pedidos/crear', async (req, res) => {
     }
 });
 
-// 🟡 CONSULTA: Obtener Pedidos Activos por Región (Repartidor)
 app.get('/api/pedidos/activos/:id_region', async (req, res) => {
     const { id_region } = req.params;
     let connection;
@@ -310,7 +287,6 @@ app.get('/api/pedidos/activos/:id_region', async (req, res) => {
     }
 });
 
-// 🔵 MODIFICACIÓN: Cambiar Estado de Pedido (Tiempo Real)
 app.put('/api/pedidos/actualizar-estado', async (req, res) => {
     const { id_pedido, id_region, estado, nuevoEstado, id_repartidor } = req.body;
     const estadoFinal = estado || nuevoEstado;
@@ -322,25 +298,15 @@ app.put('/api/pedidos/actualizar-estado', async (req, res) => {
 
         const query = `
             UPDATE pedidos 
-            SET estado = ?, 
-                id_repartidor = COALESCE(?, id_repartidor) 
+            SET estado = ?, id_repartidor = COALESCE(?, id_repartidor) 
             WHERE id_pedido = ?
         `;
         await connection.execute(query, [estadoFinal, id_repartidor || null, id_pedido]);
 
         const datosActualizados = { id_pedido, estado: estadoFinal, id_repartidor };
-
-        // 💥 EVENTOS SOCKET:
         io.to(`pedido_${id_pedido}`).emit('cambio_estado_pedido', datosActualizados);
-        io.to(`region_${nodoTarget}`).emit('actualizacion_region', datosActualizados);
-        io.to(`region_${nodoTarget}`).emit('actualizacion_pedido_region', datosActualizados);
 
-        res.status(200).json({ 
-            success: true, 
-            message: `Estado actualizado a '${estadoFinal}' exitosamente.`,
-            estado: estadoFinal 
-        });
-
+        res.status(200).json({ success: true, message: `Estado actualizado a '${estadoFinal}'.`, estado: estadoFinal });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     } finally {
@@ -348,41 +314,13 @@ app.put('/api/pedidos/actualizar-estado', async (req, res) => {
     }
 });
 
-// 🔴 BAJA: Cancelar Pedido
-app.delete('/api/pedidos/cancelar/:id_region/:id_pedido', async (req, res) => {
-    const { id_region, id_pedido } = req.params;
-    let connection;
-
-    try {
-        const nodoTarget = parseInt(id_region, 10) || 1;
-        connection = await getNodoConnection(nodoTarget);
-
-        await connection.execute(
-            `UPDATE pedidos SET estado = 'cancelado' WHERE id_pedido = ?`,
-            [id_pedido]
-        );
-
-        io.to(`region_${nodoTarget}`).emit('actualizacion_region', { id_pedido, estado: 'cancelado' });
-
-        res.status(200).json({ success: true, message: "Pedido cancelado correctamente." });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// ====================================================================
-// 🍔 PRODUCTOS / MENÚ (ADMIN SUCURSAL - CRUD COMPLETO)
-// ====================================================================
-
-// Obtener Productos por Región
+// Productos
 app.get('/api/productos/:id_region', async (req, res) => {
     const { id_region } = req.params;
     let connection;
 
     try {
-        connection = await getNodoConnection(parseInt(id_region, 10));
+        connection = await getNodoConnection(parseInt(id_region, 10) || 1);
         const [rows] = await connection.execute(`SELECT * FROM productos ORDER BY id_producto DESC`);
         res.status(200).json({ success: true, productos: rows });
     } catch (error) {
@@ -392,161 +330,7 @@ app.get('/api/productos/:id_region', async (req, res) => {
     }
 });
 
-// 🟢 ALTA: Crear Producto
-app.post('/api/productos/crear', async (req, res) => {
-    const { id_region, nombre, descripcion, precio, id_restaurante } = req.body;
-    let connection;
-
-    try {
-        const nodoTarget = parseInt(id_region, 10) || 1;
-        connection = await getNodoConnection(nodoTarget);
-
-        const query = `
-            INSERT INTO productos (id_region, id_restaurante, nombre, descripcion, precio) 
-            VALUES (?, ?, ?, ?, ?)
-        `;
-        const [result] = await connection.execute(query, [
-            nodoTarget,
-            id_restaurante || '1',
-            nombre,
-            descripcion || '',
-            precio
-        ]);
-
-        res.status(201).json({
-            success: true,
-            message: "Producto creado exitosamente.",
-            id_producto: result.insertId
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// 🔵 MODIFICACIÓN: Editar Producto
-app.put('/api/productos/editar', async (req, res) => {
-    const { id_producto, id_region, nombre, descripcion, precio } = req.body;
-    let connection;
-
-    try {
-        connection = await getNodoConnection(parseInt(id_region, 10));
-
-        const query = `
-            UPDATE productos 
-            SET nombre = ?, descripcion = ?, precio = ? 
-            WHERE id_producto = ?
-        `;
-        await connection.execute(query, [nombre, descripcion, precio, id_producto]);
-
-        res.status(200).json({ success: true, message: "Producto actualizado correctamente." });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// 🔴 BAJA: Eliminar Producto
-app.delete('/api/productos/eliminar/:id_region/:id_producto', async (req, res) => {
-    const { id_region, id_producto } = req.params;
-    let connection;
-
-    try {
-        connection = await getNodoConnection(parseInt(id_region, 10));
-        await connection.execute(`DELETE FROM productos WHERE id_producto = ?`, [id_producto]);
-
-        res.status(200).json({ success: true, message: "Producto eliminado correctamente." });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// ====================================================================
-// 👥 USUARIOS (ADMIN GENERAL - CRUD COMPLETO)
-// ====================================================================
-
-// Obtener Usuarios por Región
-app.get('/api/usuarios/:id_region', async (req, res) => {
-    const { id_region } = req.params;
-    let connection;
-
-    try {
-        connection = await getNodoConnection(parseInt(id_region, 10));
-        const [rows] = await connection.execute(
-            `SELECT id_usuario, id_region, nombre, email, rol FROM usuarios ORDER BY nombre ASC`
-        );
-        res.status(200).json({ success: true, usuarios: rows });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// 🔵 MODIFICACIÓN: Editar Usuario
-app.put('/api/usuarios/editar', async (req, res) => {
-    const { id_usuario, id_region, nombre, email, rol } = req.body;
-    let connection;
-
-    try {
-        connection = await getNodoConnection(parseInt(id_region, 10));
-
-        const query = `
-            UPDATE usuarios 
-            SET nombre = ?, email = ?, rol = ? 
-            WHERE id_usuario = ?
-        `;
-        await connection.execute(query, [nombre, email, rol, id_usuario]);
-
-        res.status(200).json({ success: true, message: "Usuario actualizado correctamente." });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// 🔴 BAJA: Eliminar Usuario
-app.delete('/api/usuarios/eliminar/:id_region/:id_usuario', async (req, res) => {
-    const { id_region, id_usuario } = req.params;
-    let connection;
-
-    try {
-        connection = await getNodoConnection(parseInt(id_region, 10));
-        await connection.execute(`DELETE FROM usuarios WHERE id_usuario = ?`, [id_usuario]);
-
-        res.status(200).json({ success: true, message: "Usuario eliminado correctamente." });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    } finally {
-        if (connection) await connection.end();
-    }
-});
-
-// ====================================================================
-// 🚀 ARRANCAR SERVIDOR EN IP GLOBAL '0.0.0.0'
-// ====================================================================
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, '0.0.0.0', () => {
-    const interfaces = os.networkInterfaces();
-    let localIp = '192.168.100.17';
-
-    for (const name of Object.keys(interfaces)) {
-        for (const net of interfaces[name]) {
-            if (net.family === 'IPv4' && !net.internal) {
-                localIp = net.address;
-                break;
-            }
-        }
-    }
-
-    console.log(`\n🚀 EatFast Distributed Engine v3.0 corriendo correctamente:`);
-    console.log(`   - Desde PC Local: http://localhost:${PORT}`);
-    console.log(`   - Desde Celular/Red: http://${localIp}:${PORT}\n`);
-    console.log(`📌 Usa esta URL base en Flutter: http://${localIp}:${PORT}/api`);
+    console.log(`🚀 EatFast Engine corriendo en el puerto: ${PORT}`);
 });
