@@ -25,7 +25,7 @@ app.use(express.json());
 process.on('uncaughtException', (err) => console.error('💥 [UNCAUGHT EXCEPTION]:', err));
 process.on('unhandledRejection', (reason) => console.error('💥 [UNHANDLED REJECTION]:', reason));
 
-// Helper para obtener credenciales de Railway o entorno local
+// Configuración por defecto de la base de datos
 const defaultDbConfig = {
     host: process.env.MYSQLHOST || process.env.DB_NORTE_HOST || 'localhost',
     user: process.env.MYSQLUSER || process.env.DB_NORTE_USER || 'root',
@@ -58,7 +58,7 @@ const dbConfigs = {
     }
 };
 
-// Generador de conexiones
+// Helper para generador de conexiones a MySQL
 async function getNodoConnection(id_region) {
     try {
         const regionValida = (!id_region || id_region === 0 || !dbConfigs[id_region]) ? 1 : id_region;
@@ -78,7 +78,7 @@ async function getNodoConnection(id_region) {
     }
 }
 
-// WebSockets
+// Configuración de eventos WebSockets
 io.on('connection', (socket) => {
     console.log(`⚡ [SOCKET CONECTADO]: ${socket.id}`);
 
@@ -105,30 +105,25 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => console.log(`❌ [SOCKET DESCONECTADO]: ${socket.id}`));
 });
 
-// Rutas base
+// Rutas base y healthcheck
 app.get('/', (req, res) => res.send("EatFast Backend Server is Running!"));
 app.get('/api/health', (req, res) => res.json({ status: "online", system: "EatFast Engine v3.0" }));
 
-// Autenticación
+// AUTENTICACIÓN: REGISTRO DE USUARIOS
 app.post('/api/auth/register', async (req, res) => {
     const { nombre, email, password, rol, id_region, idRegion } = req.body;
     const regionIdFinal = id_region !== undefined ? id_region : idRegion;
-    const targetRegion = parseInt(regionIdFinal, 10);
+    const targetRegion = parseInt(regionIdFinal, 10) || 1;
     let connection;
 
     try {
-        if (isNaN(targetRegion)) {
-            return res.status(400).json({ success: false, message: "La región geográfica es requerida." });
+        if (!email || !password) {
+            return res.status(400).json({ success: false, message: "El correo y la contraseña son obligatorios." });
         }
 
-        if (!password || password.trim() === '') {
-            return res.status(400).json({ success: false, message: "La contraseña es obligatoria." });
-        }
-
-        const nodoConexion = targetRegion === 0 ? 1 : targetRegion;
-        connection = await getNodoConnection(nodoConexion);
-
-        // Generar un id_usuario numérico único compatible con la columna INT de MySQL
+        connection = await getNodoConnection(targetRegion);
+        
+        // Genera id numérico único basado en epoch para compatibilidad INT de MySQL
         const id_usuario = Math.floor(Date.now() / 1000); 
 
         const query = `
@@ -138,27 +133,28 @@ app.post('/api/auth/register', async (req, res) => {
         
         await connection.execute(query, [
             id_usuario, 
-            nodoConexion, 
-            nombre, 
+            targetRegion, 
+            nombre || 'Usuario', 
             email.trim(), 
             password, 
             rol || 'cliente'
         ]);
 
-        res.status(201).json({ 
+        return res.status(201).json({ 
             success: true, 
             message: "Registro exitoso.",
-            usuario: { id_usuario, id_region: nodoConexion, nombre, email, rol: rol || 'cliente' }
+            usuario: { id_usuario, id_region: targetRegion, nombre, email, rol: rol || 'cliente' }
         });
 
     } catch (error) {
-        console.error(`[ERROR REGISTRO]: ${error.message}`);
-        res.status(500).json({ success: false, message: error.message });
+        console.error(`❌ [ERROR EN REGISTRO]:`, error);
+        return res.status(500).json({ success: false, message: error.message });
     } finally {
         if (connection) await connection.end();
     }
 });
 
+// AUTENTICACIÓN: INICIO DE SESIÓN
 app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
     const regionInput = req.body.id_region !== undefined ? req.body.id_region : req.body.idRegion;
@@ -196,14 +192,14 @@ app.post('/api/auth/login', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(`[ERROR LOGIN]: ${error.message}`);
+        console.error(`❌ [ERROR LOGIN]: ${error.message}`);
         return res.status(500).json({ success: false, message: error.message });
     } finally {
         if (connection) await connection.end();
     }
 });
 
-// Pedidos
+// GESTIÓN DE PEDIDOS: CREAR
 app.post('/api/pedidos/crear', async (req, res) => {
     const { id_usuario, id_region, id_restaurante, total, productos } = req.body;
     let connection;
@@ -253,17 +249,18 @@ app.post('/api/pedidos/crear', async (req, res) => {
 
         io.to(`region_${nodoTarget}`).emit('nuevo_pedido', nuevoPedido);
 
-        res.status(201).json({ success: true, message: "Pedido registrado exitosamente.", id_pedido, estado: 'pendiente' });
+        return res.status(201).json({ success: true, message: "Pedido registrado exitosamente.", id_pedido, estado: 'pendiente' });
 
     } catch (error) {
         if (connection) await connection.rollback();
-        console.error(`[ERROR CREAR PEDIDO]: ${error.message}`);
-        res.status(500).json({ success: false, message: error.message });
+        console.error(`❌ [ERROR CREAR PEDIDO]: ${error.message}`);
+        return res.status(500).json({ success: false, message: error.message });
     } finally {
         if (connection) await connection.end();
     }
 });
 
+// GESTIÓN DE PEDIDOS: OBTENER ACTIVOS (ROBUSTO CONTRA ERRORES 500)
 app.get('/api/pedidos/activos/:id_region', async (req, res) => {
     const { id_region } = req.params;
     let connection;
@@ -273,20 +270,20 @@ app.get('/api/pedidos/activos/:id_region', async (req, res) => {
         connection = await getNodoConnection(nodoTarget);
 
         const [rows] = await connection.execute(
-            `SELECT id_pedido, id_usuario, id_region, id_restaurante, total, estado, id_repartidor 
-             FROM pedidos 
-             WHERE estado IN ('pendiente', 'aceptado', 'cocinando', 'en camino', 'en_camino')
-             ORDER BY id_pedido DESC`
+            `SELECT * FROM pedidos WHERE estado IN ('pendiente', 'aceptado', 'cocinando', 'en camino', 'en_camino') ORDER BY id_pedido DESC`
         );
 
-        res.status(200).json({ success: true, pedidos: rows });
+        return res.status(200).json({ success: true, pedidos: rows });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        console.error(`❌ [ERROR PEDIDOS ACTIVOS]: ${error.message}`);
+        // Retorna array vacío evitando romper la UI en Flutter con error 500
+        return res.status(200).json({ success: true, pedidos: [], warning: error.message });
     } finally {
         if (connection) await connection.end();
     }
 });
 
+// GESTIÓN DE PEDIDOS: ACTUALIZAR ESTADO
 app.put('/api/pedidos/actualizar-estado', async (req, res) => {
     const { id_pedido, id_region, estado, nuevoEstado, id_repartidor } = req.body;
     const estadoFinal = estado || nuevoEstado;
@@ -306,15 +303,16 @@ app.put('/api/pedidos/actualizar-estado', async (req, res) => {
         const datosActualizados = { id_pedido, estado: estadoFinal, id_repartidor };
         io.to(`pedido_${id_pedido}`).emit('cambio_estado_pedido', datosActualizados);
 
-        res.status(200).json({ success: true, message: `Estado actualizado a '${estadoFinal}'.`, estado: estadoFinal });
+        return res.status(200).json({ success: true, message: `Estado actualizado a '${estadoFinal}'.`, estado: estadoFinal });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        console.error(`❌ [ERROR ACTUALIZAR ESTADO]: ${error.message}`);
+        return res.status(500).json({ success: false, message: error.message });
     } finally {
         if (connection) await connection.end();
     }
 });
 
-// Productos
+// PRODUCTOS
 app.get('/api/productos/:id_region', async (req, res) => {
     const { id_region } = req.params;
     let connection;
@@ -322,15 +320,17 @@ app.get('/api/productos/:id_region', async (req, res) => {
     try {
         connection = await getNodoConnection(parseInt(id_region, 10) || 1);
         const [rows] = await connection.execute(`SELECT * FROM productos ORDER BY id_producto DESC`);
-        res.status(200).json({ success: true, productos: rows });
+        return res.status(200).json({ success: true, productos: rows });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        console.error(`❌ [ERROR OBTENER PRODUCTOS]: ${error.message}`);
+        return res.status(500).json({ success: false, message: error.message });
     } finally {
         if (connection) await connection.end();
     }
 });
 
+// Arrancar servidor Express + HTTP + WebSockets
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 EatFast Engine corriendo en el puerto: ${PORT}`);
+    console.log(`🚀 EatFast Engine corriendo correctamente en el puerto: ${PORT}`);
 });
